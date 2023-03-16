@@ -1,5 +1,4 @@
 rsconnect::setAccountInfo(name='fantasyanalytics', token='C2AB37E235CB97095C45A22804471B84', secret='EWdGwFby/nHaTEZA6LGMudWdcbVpDxPHwSvpOmSU')
-
 players <- structure(list(Player = c("Josh Allen", "Patrick Mahomes", "Justin Herbert", 
                                      "Lamar Jackson", "Kyler Murray", "Jalen Hurts", "Tom Brady", 
                                      "Dak Prescott", "Joe Burrow", "Russell Wilson", "Aaron Rodgers", 
@@ -86,25 +85,28 @@ players <- structure(list(Player = c("Josh Allen", "Patrick Mahomes", "Justin He
                                                                                 12, 12, 11, 9, 9, 9, 7, 5, 6, 4, 2, 2, 2, 1, 3, 1, 1, 1, 1, 1, 
                                                                                 1, 1, 1, 1, 1)), class = c("tbl_df", "tbl", "data.frame"), row.names = c(NA, 
                                                                                                                                                          -177L))
-
 library(shiny)
 library(lpSolve)
-library(rsconnect)
+library(purrr)
+library(shinyjs)
 
 # Define the UI for the app
 ui <- fluidPage(
+  useShinyjs(),
   titlePanel("Fantasy Football Lineup Optimizer"),
   
   sidebarLayout(
     sidebarPanel(
-      numericInput("num_qb", "Enter the number of QBs:", 1),
-      numericInput("num_rb", "Enter the number of RBs:", 2),
-      numericInput("num_wr", "Enter the number of WRs:", 3),
-      numericInput("num_te", "Enter the number of TEs:", 1),
+      numericInput("num_qb", "Enter the number of QBs:", 1, min = 1, max = 5),
+      numericInput("num_rb", "Enter the number of RBs:", 2, min = 1, max = 5),
+      numericInput("num_wr", "Enter the number of WRs:", 2, min = 1, max = 5),
+      numericInput("num_te", "Enter the number of TEs:", 1, min = 1, max = 5),
       numericInput("num_value", "Enter your draft budget:", 200),
-      numericInput("num_players", "Adding in your flex spots, enter the total number of starters:", 9),
-      selectInput("remove", "Remove a player:", choices = c("",as.character(players$Player)), multiple = TRUE),
-      actionButton("update", "Update Team")
+      numericInput("num_players", "Adding in your flex spots, enter the total number of starters:", 9, min = 1, max = 15),
+      actionButton("set_const", "Set Draft Constraints"),
+      selectInput("remove", "Remove a player:", choices = c("",as.character(players$Player)), multiple = FALSE),
+      selectInput("draft_player", "Draft Player", choices = c("",as.character(players$Player)), multiple = FALSE),
+      actionButton("update", "Update Lineup")
     ),
     mainPanel(
       tableOutput("team")
@@ -113,8 +115,11 @@ ui <- fluidPage(
 )
 
 # Define the server logic
-server <- function(input, output) {
+server <- function(input, output, session) {
   players <- players
+  
+  # New col to indicate if a player has been drafted
+  players$Drafted = "No"
   
   # Create a new column indicating the player's position
   players$QB <- ifelse(players$Position == "QB", 1, 0)
@@ -124,64 +129,118 @@ server <- function(input, output) {
   players$Total <- 1
   rv <- reactiveValues(players=players)
   
+  # Set up reactive table for lineup output
+  updateLineup = reactiveVal(NULL)
+  
   # Define the objective function (maximize fantasy points)
   obj <- players$FantasyPoints
   
   # Define the constraints (position limits and draft value limit)
   con <- reactive({
     matrix(c(
-      # QB constraint
+      # Position constraint
       rv$players$QB,
-      # RB constraint
       rv$players$RB,
-      # WR constraint
       rv$players$WR,
-      # TE constraint
       rv$players$TE,
-      # Draft value constraint
-      rv$players$DraftValue,
+      # Flex constraints
+      rv$players$RB,
+      rv$players$WR,
+      rv$players$TE,
       #Total players constraint
-      rv$players$Total
+      rv$players$Total,
+      # Draft value constraint
+      rv$players$DraftValue
     ), ncol = nrow(rv$players), byrow = TRUE)
   })
   
-  
   # Define the variables for the lp
-  dir <- c("<=", rep(">=",3),"<=","<=")
+  dir <- c("<=",rep(">=",3),rep("<=",3),"==","<=")
+  
+  # Define num of flex spots
+  flex_spots = reactive(input$num_players - sum(input$num_qb,input$num_rb,input$num_wr,input$num_te))
+  
+  # Define initial 'const.rhs'
+  init_rhs <- reactive({
+    list(
+      QB = input$num_qb,
+      RB = input$num_rb,
+      WR = input$num_wr,
+      TE = input$num_te,
+      RB_flex = input$num_rb + flex_spots(),
+      WR_flex = input$num_wr + flex_spots(),
+      TE_flex = input$num_te + flex_spots(),
+      n_players = input$num_players,
+      n_val = input$num_value
+    )
+  })
+  
+  # Define reactive 'const.rhs'
+  rhs = reactiveValues(const = list())
   
   # Define the initial optimal lineup
   initialLineup <- reactive({
-    rhs <- reactive({
-      c(input$num_qb, input$num_rb, input$num_wr, input$num_te, input$num_value, input$num_players)
-    })
-    result <- lp("max", obj, con(), dir, rhs(), all.bin = TRUE)
+    result <- lp("max", obj, con(), dir, init_rhs(), all.bin = TRUE)
     rv$players[result$solution == 1,]
+  })
+  
+  # Set constraints and disable draft inputs
+  observeEvent(input$set_const, {
+    disable(selector = "input[type = 'number']")
+    disable(id = "set_const")
+    rhs$const = init_rhs()
   })
   
   # Define the function to run when the "update" button is pressed
-  updateLineup <- eventReactive(input$update, {
-    removedPlayer <- input$remove
-    rv$players <- rv$players[rv$players$Player != removedPlayer,]
-    obj <- rv$players$FantasyPoints
-    rhs <- reactive({
-      c(input$num_qb, input$num_rb, input$num_wr, input$num_te, input$num_value, input$num_players)
-    })
-    result <- lp("max", obj, con(), dir, rhs(), all.bin = TRUE)
-    rv$players[result$solution == 1,]
+  observeEvent(input$update, {
+    if(input$set_const == 0) { stop("Please set draft constraints first") }
     
+    # Remove player here
+    if(input$remove != "") {
+      removedPlayer <- input$remove
+      rv$players <- rv$players[rv$players$Player != removedPlayer,]
+      obj <- rv$players$FantasyPoints
+    }
+    
+    # Draft player
+    if(input$draft_player != "") {
+      draftedPlayer <- input$draft_player
+      draftedPlayer_details <- rv$players[rv$players$Player == draftedPlayer,]
+      draftedPlayer_details$Drafted = "Yes"
+      rv$players <- rv$players[rv$players$Player != draftedPlayer,]
+      rv$draftedPlayers <- rbind(rv$draftedPlayers, draftedPlayer_details)
+      obj <- rv$players$FantasyPoints # missing object
+      
+      # Subtract constraints: position and n_players by 1 and draft budget by the players 'DraftValue'
+      # Necessary so "result" outputs a table with the remaining positions left
+      # otherwise it will return an entirely new lineup
+      rhs$const = purrr::imap(rhs$const, function(cs, nm) {
+        if(nm == draftedPlayer_details$Position) {cs = cs - 1}
+        if(nm == "n_players") {cs = cs - 1}
+        if(nm == "n_val") {cs = cs - draftedPlayer_details$DraftValue}
+        return(cs)
+      })
+    }
+    
+    # Update select inputs to remove players after "Update Lineup" is clicked
+    if(input$remove != "" || input$draft_player != "") {
+      updateSelectInput(session, inputId = "remove", choices = c("",rv$players), selected = "")
+      updateSelectInput(session, inputId = "draft_player", choices = c("",rv$players), selected = "")
+    }
+    
+    # Define result with updated arguments
+    result <- lp("max", obj, con(), dir, rhs$const, all.bin = TRUE)
+    # Assign new table to the reactiveVal 'updateLineup'
+    updateLineup(rbind(rv$draftedPlayers, rv$players[result$solution == 1,]))
   })
   
-  # Show the updated optimal team in a table when the "update" button is pressed
   output$team <- renderTable({
-    if (is.null(input$remove)) {
-      initialLineup()
+    if (input$update == 0) {
+      initialLineup()[, c("Player", "Position", "FantasyPoints", "DraftValue", "Drafted")]
     } else {
-      updateLineup()
+      updateLineup()[, c("Player", "Position", "FantasyPoints", "DraftValue", "Drafted")]
     }
   })
 }
-
-
 # Run the app
 shinyApp(ui, server)
-
