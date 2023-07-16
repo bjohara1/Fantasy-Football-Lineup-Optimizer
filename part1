@@ -1,0 +1,109 @@
+library(shiny)
+library(readxl)
+library(dplyr)
+library(DT)
+library(tidyr)
+library(readxl)
+library(aws.s3)
+library(aws.signature)
+library(uuid)
+
+# Replace "your_access_key_id" and "your_secret_access_key" with your actual AWS credentials
+Sys.setenv("AWS_ACCESS_KEY_ID" = "AKIA2CH7IVOWVMCMOOE7")
+Sys.setenv("AWS_SECRET_ACCESS_KEY" = "axw9Wp3BfvtXQFbQ6V3DKIPWGLXtcxSJ2NrKtoyD")
+Sys.setenv("AWS_DEFAULT_REGION" = "us-east-2")
+
+ui <- fluidPage(
+  titlePanel("Fantasy Football Custom Scoring"),
+  textInput("user_uuid", "Enter your UUID:", ""),
+  sidebarLayout(
+    sidebarPanel(
+      numericInput("pass_yards", "Pass Yards per Point", .25, step = 0.1),
+      numericInput("pass_td", "Pass TDs per Point", 4, step = 0.1),
+      numericInput("int", "Interceptions per Point", -1, step = 0.1),
+      numericInput("rush_yards", "Rush Yards per Point", .10, step = 0.1),
+      numericInput("rush_td", "Rush TDs per Point", 6, step = 0.1),
+      numericInput("receptions", "Receptions per Point", 0, step = 0.1),
+      numericInput("rec_yards", "Receiving Yards per Point", .10, step = 0.1),
+      numericInput("rec_td", "Receiving TDs per Point", 6, step = 0.1),
+      actionButton("customize", "Customize for My League"),
+    ),
+    mainPanel(
+      textOutput("message"),
+      dataTableOutput("playersTable")
+    )
+  )
+)
+server <- function(input, output) {
+  players <- reactiveVal(NULL) 
+  # Create a reactive value to store the updated Players dataset
+  observeEvent(input$customize, {
+    # Load datasets
+    # Read the draft1.xlsx file from Amazon S3
+    temp_file1 <- tempfile(fileext = ".xlsx")
+    aws.s3::save_object("draft1.xlsx", file = temp_file1, bucket = "optimizedraftfantasy")
+    dataset1 <- readxl::read_excel(temp_file1)
+    
+    # Read the stats.xlsx file from Amazon S3
+    temp_file2 <- tempfile(fileext = ".xlsx")
+    aws.s3::save_object("stats.xlsx", file = temp_file2, bucket = "optimizedraftfantasy")
+    dataset2 <- readxl::read_excel(temp_file2)
+    
+    
+    # Replace NAs with 0s in dataset2
+    players <- dataset1 %>%
+      left_join(dataset2, by = c("Player" = "Player", "Position" = "Position")) %>%
+      rename(DraftValue = DraftValue) %>%
+      select(Player, Position, FantasyPoints, DraftValue)
+    
+    players <- players %>%
+      mutate(DraftValue = replace_na(DraftValue, 0),
+             FantasyPoints = round(FantasyPoints, 0),
+             DraftValue = round(DraftValue, 0)) # Add this line to round the DraftValue column
+    
+    
+    # Calculate FantasyPoints
+    dataset2 <- dataset2 %>%
+      mutate(FantasyPoints = (PassYards / (input$pass_yards*100)) + (PassTD * input$pass_td) + (Int * input$int) + 
+               (RushYards * input$rush_yards) + (RushTD * input$rush_td) + 
+               (Receptions * input$receptions) + (RecYards * input$rec_yards) + 
+               (RecTD * input$rec_td))
+    
+    
+    # Merge datasets
+    players <- left_join(dataset1, dataset2 %>% select(Player, FantasyPoints), by = "Player")
+    
+    # Select only Player, Position, DraftValue, and FantasyPoints columns
+    players <- players %>%
+      select(Player, Position, DraftValue, FantasyPoints)
+    
+    # Replace NA/NaN/Inf values in the FantasyPoints column with 0
+    players$FantasyPoints <- replace_na(players$FantasyPoints, 0)
+    
+    # Store the updated Players dataset in the reactive value
+    players(players)
+    
+    # Use input$user_uuid instead of generating a new UUID
+    user_uuid <- reactive({input$user_uuid})
+    
+    observeEvent(input$user_uuid, {
+      # Save the Players dataset as a CSV file
+      write.csv(players, "players.csv", row.names = FALSE)
+      
+      # Create a user-specific object name
+      user_object <- paste0(user_uuid(), "_players.csv")
+      
+      # Upload the CSV file to S3
+      aws.s3::put_object(file = "players.csv", object = user_object, bucket = "optimizedraftfantasy")
+      
+      # Remove the local CSV file
+      file.remove("players.csv")
+      output$message <- renderText("Datasets merged and customized successfully.")
+    })
+  })
+  output$playersTable <- renderDataTable({
+    req(players()) # Ensure the table is displayed only when the Players dataset is available
+    datatable(players()) # Display the resulting dataset as a table
+  })
+}
+shinyApp(ui = ui, server = server)
