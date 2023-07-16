@@ -7,9 +7,9 @@ library(aws.signature)
 library(uuid)
 
 # Replace "your_access_key_id" and "your_secret_access_key" with your actual AWS credentials
-Sys.setenv("AWS_ACCESS_KEY_ID" = "AKIA2CH7IVOWVMCMOOE7")
-Sys.setenv("AWS_SECRET_ACCESS_KEY" = "axw9Wp3BfvtXQFbQ6V3DKIPWGLXtcxSJ2NrKtoyD")
-Sys.setenv("AWS_DEFAULT_REGION" = "us-east-2")
+Sys.setenv("AWS_ACCESS_KEY_ID" = "")
+Sys.setenv("AWS_SECRET_ACCESS_KEY" = "")
+Sys.setenv("AWS_DEFAULT_REGION" = "")
 
 # Define the UI for the app
 ui <- fluidPage(
